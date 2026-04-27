@@ -1,19 +1,25 @@
 {
-  "name": "webrtc-app",
+  "name": "webrtc-meeting-app",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "",
+  "main": "server/server.js",
   "scripts": {
+    "start": "node server/server.js",
+    "dev": "nodemon server/server.js",
+    "turn:up": "cd turn-server && bash run.sh",
+    "turn:down": "cd turn-server && docker compose down",
+    "deploy:all": "npm run turn:up && npm start",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
+  "author": "Nhom Anti Lap Trinh Mang",
   "license": "ISC",
-  "description": "",
   "dependencies": {
+    "dotenv": "^17.4.2",
     "express": "^4.21.2",
-    "fs": "^0.0.1-security",
-    "https": "^1.0.0",
     "uuid": "^11.1.0",
     "ws": "^8.18.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
   }
 }
