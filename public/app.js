@@ -1,132 +1,476 @@
-let rtcConfig = null;
-let localStream = null;
-const peers = {}; // Store (n-1) peer connections: { targetId: RTCPeerConnection }
-let ws;
-const myClientId = Math.random().toString(36).substring(2, 9); // Random ID for testing
-const roomId = "demo-room"; // Can be replaced with UI input value
-const ICE_TIMEOUT_MS = 12000; // Fallback timeout: 12 seconds
+// ═══════════════════════════════════════════════════════════════════════════════
+// WebRTC Mesh Group Call — Client Logic (B1 UI + Mesh Signaling)
+// ═══════════════════════════════════════════════════════════════════════════════
 
-// 1. Initialize System
-async function init() {
-    try {
-        console.log("[INFO] Fetching ICE configuration from server...");
-        const response = await fetch('/api/turn-config');
-        rtcConfig = await response.json();
-        console.log("[INFO] ICE configuration loaded successfully.");
+// ── State ─────────────────────────────────────────────────────────────────────
+let rtcConfig    = null;
+let localStream  = null;
+/** @type {Object.<string, RTCPeerConnection>} */
+let peers        = {};
+let ws           = null;
+let micEnabled   = true;
+let camEnabled   = true;
+let groupCallActive = false;
 
-        // DÁN VÀO ĐÂY: Hiển thị ID lên màn hình sau khi mọi thứ đã sẵn sàng
-        document.getElementById('my-id-display').innerText = myClientId;
-        updateUIStatus("System Ready. Requesting Camera..."); // Thêm dòng này cho UI sinh động
+// ── Member list: Set of clientIds currently in the room ───────────────────────
+/** @type {Set<string>} */
+const roomMembers = new Set();
 
-        console.log("[INFO] Requesting media access...");
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        
-        const localVideo = document.getElementById('localVideo');
-        if (localVideo) localVideo.srcObject = localStream;
+/** @type {Map<string, boolean>} */
+const memberMicEnabled = new Map();
 
-        connectSignaling();
-    } catch (err) {
-        console.error("[ERROR] Initialization failed:", err);
-        updateUIStatus("Error: Camera not found or Server down.", true);
+// ── Identity (random, generated once per page load) ───────────────────────────
+const myClientId = Math.random().toString(36).substring(2, 9);
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+const ICE_TIMEOUT_MS = 12000;
+
+// ── Avatar colors (deterministic based on ID) ─────────────────────────────────
+const AVATAR_COLORS = [
+    '#3b82f6','#8b5cf6','#ec4899','#f59e0b',
+    '#22c55e','#06b6d4','#f97316','#6366f1'
+];
+function getAvatarColor(id) {
+    let hash = 0;
+    for (const c of id) hash = (hash * 31 + c.charCodeAt(0)) & 0xffff;
+    return AVATAR_COLORS[hash % AVATAR_COLORS.length];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 1. BOOTSTRAP — show lobby on page load (no auto-join)
+// ═══════════════════════════════════════════════════════════════════════════════
+window.onload = () => {
+    // Display my ID in both navbar and lobby card
+    document.getElementById('my-id-display').innerText  = myClientId;
+    document.getElementById('lobby-my-id').innerText    = myClientId;
+    document.getElementById('local-video-label').innerText = `Bạn (${myClientId})`;
+
+    // Pre-fetch ICE config in background so it's ready when user clicks Join
+    fetch('/api/turn-config')
+        .then(r => r.json())
+        .then(cfg => {
+            rtcConfig = cfg;
+            console.log('[INFO] ICE config pre-loaded.');
+        })
+        .catch(() => console.warn('[WARN] Could not pre-load ICE config.'));
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2. UI PHASE HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+function showLobby() {
+    document.getElementById('lobby-screen').style.display = 'flex';
+    document.getElementById('room-screen').classList.remove('active');
+    document.getElementById('room-chip').style.display = 'none';
+}
+
+function showRoom(roomId) {
+    document.getElementById('lobby-screen').style.display = 'none';
+    document.getElementById('room-screen').classList.add('active');
+    document.getElementById('room-display').innerText  = roomId;
+    document.getElementById('room-title').innerText    = roomId;
+    document.getElementById('room-chip').style.display = 'block';
+}
+
+function showLoading(text = 'Đang xử lý...') {
+    document.getElementById('loading-overlay').classList.add('active');
+    document.getElementById('loading-text').innerText = text;
+}
+
+function hideLoading() {
+    document.getElementById('loading-overlay').classList.remove('active');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3. MEMBER LIST — render / add / remove
+// ═══════════════════════════════════════════════════════════════════════════════
+function renderMemberList() {
+    const ul    = document.getElementById('member-list');
+    const badge = document.getElementById('member-count-badge');
+    const badge2 = document.getElementById('room-status-badge');
+
+    ul.innerHTML = '';
+    const totalCount = roomMembers.size + 1; // +1 for self
+
+    badge.innerText = totalCount;
+    badge2.innerText = `${totalCount} thành viên`;
+    badge2.style.background = 'rgba(34,197,94,0.15)';
+    badge2.style.color = '#22c55e';
+    badge2.style.border = '1px solid rgba(34,197,94,0.3)';
+    badge2.style.borderRadius = '20px';
+    badge2.style.padding = '2px 9px';
+    badge2.style.fontSize = '0.72rem';
+
+    // Render self first
+    ul.appendChild(buildMemberItem(myClientId, 'me'));
+
+    // Render others
+    for (const id of roomMembers) {
+        const hasConnection = peers[id] && peers[id].connectionState === 'connected';
+        ul.appendChild(buildMemberItem(id, hasConnection ? 'connected' : 'online'));
     }
 }
 
-// 2. WebSocket Signaling Logic
-function connectSignaling() {
+function buildMemberItem(id, cssClass = '') {
+    const li = document.createElement('li');
+    li.className = `member-item ${cssClass}`;
+    li.id = `member-${id}`;
+
+    const initials = id.substring(0, 2).toUpperCase();
+    const color    = getAvatarColor(id);
+    const isMe     = id === myClientId;
+
+    const micOn = id === myClientId ? micEnabled : memberMicEnabled.get(id) !== false;
+    const micBadge = micOn ? '' : ' <span class="mic-muted">🚫🎙️</span>';
+
+    li.innerHTML = `
+        <div class="member-avatar" style="background:${color}">${initials}</div>
+        <div class="member-info">
+            <div class="member-name">${id}${isMe ? ' (bạn)' : ''}${micBadge}</div>
+            <div class="member-status ${cssClass === 'connected' ? 'calling' : 'online'}">
+                ${isMe ? '● Bạn' : cssClass === 'connected' ? '● Đang gọi' : '● Trong phòng'}
+            </div>
+        </div>
+    `;
+    return li;
+}
+
+function addMember(id) {
+    roomMembers.add(id);
+    if (!memberMicEnabled.has(id)) memberMicEnabled.set(id, true);
+    renderMemberList();
+}
+
+function removeMember(id) {
+    roomMembers.delete(id);
+    memberMicEnabled.delete(id);
+    renderMemberList();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 4. LOBBY ACTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+function getRoomId() {
+    const input = document.getElementById('room-input');
+    return (input ? input.value.trim() : '') || '';
+}
+
+/** Hiện / ẩn thông báo lỗi inline trong lobby card */
+function showLobbyError(msg) {
+    const el = document.getElementById('lobby-error');
+    if (!el) return;
+    el.innerText = msg;
+    el.style.display = msg ? 'block' : 'none';
+}
+
+/**
+ * joinRoom() — CHỈ vào được nếu phòng đã tồn tại trên server.
+ * Bước 1: kiểm tra /api/room-check → nếu không tồn tại → báo lỗi, dừng.
+ * Bước 2: xin quyền camera → kết nối WS → vào phòng.
+ */
+async function joinRoom() {
+    const roomId = getRoomId();
+    if (!roomId) {
+        showLobbyError('Vui lòng nhập tên phòng trước khi vào!');
+        return;
+    }
+
+    showLobbyError(''); // Xóa lỗi cũ
+    showLoading('Đang kiểm tra phòng...');
+
+    try {
+        // ── Bước 1: Kiểm tra phòng có tồn tại không ────────────────────
+        const checkRes = await fetch(`/api/room-check?roomId=${encodeURIComponent(roomId)}`);
+        const { exists, memberCount } = await checkRes.json();
+
+        if (!exists) {
+            hideLoading();
+            showLobbyError(`Phòng "${roomId}" không tồn tại hoặc chưa có ai trong phòng. Hãy nhập đúng Room ID hoặc dùng "Tạo Phòng Mới".`);
+            return;
+        }
+
+        console.log(`[INFO] Room "${roomId}" exists with ${memberCount} member(s). Joining...`);
+
+        // ── Bước 2: Xin quyền camera / mic ─────────────────────────────
+        await enterRoomDirect(roomId);
+
+    } catch (err) {
+        hideLoading();
+        console.error('[ERROR] joinRoom failed:', err);
+        showLobbyError('Lỗi kết nối server. Vui lòng thử lại.');
+    }
+}
+
+/**
+ * createRoom() — Tạo phòng mới với ID ngẫu nhiên.
+ * Bỏ qua bước kiểm tra tồn tại vì đây là phòng mới.
+ */
+async function createRoom() {
+    showLobbyError('');
+    const newId = 'room-' + Math.random().toString(36).substring(2, 8);
+    document.getElementById('room-input').value = newId;
+    await enterRoomDirect(newId);
+}
+
+/**
+ * enterRoomDirect() — Hàm nội bộ: xin cam/mic → vào phòng.
+ * Dùng bởi createRoom() (không cần check) và joinRoom() (sau khi đã check).
+ */
+async function enterRoomDirect(roomId) {
+    showLoading('Đang yêu cầu quyền Camera & Microphone...');
+
+    try {
+        // Fetch ICE config nếu chưa có
+        if (!rtcConfig) {
+            const r = await fetch('/api/turn-config');
+            rtcConfig = await r.json();
+        }
+
+        // Xin quyền camera + mic
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        const localVideo = document.getElementById('localVideo');
+        if (localVideo) localVideo.srcObject = localStream;
+
+        // Chuyển sang Room Screen
+        showRoom(roomId);
+        hideLoading();
+        renderMemberList();
+
+        updateUIStatus('Đang kết nối tới Signaling Server...');
+        connectSignaling(roomId);
+
+    } catch (err) {
+        hideLoading();
+        console.error('[ERROR] enterRoomDirect failed:', err);
+        if (err.name === 'NotAllowedError') {
+            showLobbyError('Không được cấp quyền Camera/Mic. Vui lòng cho phép trình duyệt và thử lại.');
+        } else {
+            showLobbyError('Lỗi: ' + err.message);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5. WEBSOCKET SIGNALING
+// ═══════════════════════════════════════════════════════════════════════════════
+function connectSignaling(roomId) {
     // Tự động nhận diện: Nếu URL là https (Ngrok) thì dùng wss://, nếu là http (localhost) thì dùng ws://
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.host}`;
-    
-    console.log("[INFO] Đang kết nối WebSocket tới:", wsUrl); // Log ra để bạn dễ kiểm tra
-    
-    ws = new WebSocket(wsUrl); // Dòng 36 mới của bạn sẽ là dòng này
+    console.log('[INFO] Connecting WebSocket to:', wsUrl);
+
+    ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
-        console.log("[INFO] Connected to Signaling Server");
-        updateUIStatus("Đã kết nối máy chủ. Đang chờ đối tác...");
-        ws.send(JSON.stringify({ type: 'joinRoom', roomId: roomId, sender: myClientId }));
+        console.log(`[INFO] WS connected. Joining room: "${roomId}"`);
+        updateUIStatus(`Đã kết nối. Đang vào phòng "${roomId}"...`);
+        ws.send(JSON.stringify({ type: 'joinRoom', roomId, sender: myClientId }));
     };
 
     ws.onmessage = async (event) => {
-        const data = JSON.parse(event.data);
+        let data;
+        try { data = JSON.parse(event.data); }
+        catch { return; }
 
         switch (data.type) {
-            case 'userJoined':
-                console.log(`[INFO] New user joined: ${data.sender}. Initiating connection...`);
-                const pc = createPeerConnection(data.sender);
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                sendToServer({ type: 'offer', target: data.sender, sdp: offer });
-                break;
 
-            case 'offer':
-                const peerOffer = createPeerConnection(data.sender);
-                await peerOffer.setRemoteDescription(new RTCSessionDescription(data.sdp));
-                const answer = await peerOffer.createAnswer();
-                await peerOffer.setLocalDescription(answer);
-                sendToServer({ type: 'answer', target: data.sender, sdp: answer });
-                break;
+            // ── Server gửi danh sách thành viên cho người mới join ─────────
+            case 'roomInfo': {
+                console.log(`[INFO] roomInfo → members: [${data.members.join(', ')}]`);
 
-            case 'answer':
-                if (peers[data.sender]) {
-                    await peers[data.sender].setRemoteDescription(new RTCSessionDescription(data.sdp));
+                for (const id of data.members) {
+                    if (id !== myClientId) {
+                        addMember(id);                       // Hiện trên member list
+                    }
                 }
-                break;
 
-            case 'candidate':
-                if (peers[data.sender]) {
-                    await peers[data.sender].addIceCandidate(new RTCIceCandidate(data.candidate));
-                }
+                updateUIStatus(
+                    data.members.length === 0
+                        ? 'Đang chờ thành viên khác tham gia...'
+                        : `Có ${data.members.length} thành viên trong phòng. Đang chờ kết nối...`
+                );
                 break;
+            }
 
-            case 'userLeft':
-                if (peers[data.sender]) {
-                    peers[data.sender].close();
-                    delete peers[data.sender];
-                    console.log(`[INFO] User disconnected: ${data.sender}`);
-                    
-                    // Remove their video from the screen
-                    const videoElement = document.getElementById(`video-${data.sender}`);
-                    if (videoElement) {
-                        videoElement.remove();
+            // ── Existing member thấy người mới → gửi offer ───────────────
+            case 'userJoined': {
+                const newId = data.sender;
+                console.log(`[INFO] userJoined: "${newId}" → tôi là existing member, gửi offer...`);
+                addMember(newId);
+
+                if (groupCallActive) {
+                    if (!peers[newId]) createPeerConnection(newId);
+                    if (shouldInitiateOffer(newId)) {
+                        const pc = peers[newId];
+                        try {
+                            const offer = await pc.createOffer();
+                            await pc.setLocalDescription(offer);
+                            sendToServer({ type: 'offer', target: newId, sdp: offer });
+                        } catch (err) {
+                            console.error(`[ERROR] createOffer to ${newId}:`, err.message);
+                        }
                     }
                 }
                 break;
+            }
+
+            // ── Nhận Offer → trả Answer ───────────────────────────────────
+            case 'offer': {
+                console.log(`[INFO] Received offer from: ${data.sender}`);
+                const offerPc = peers[data.sender] || createPeerConnection(data.sender);
+
+                // Glare guard
+                if (offerPc.signalingState === 'have-local-offer') {
+                    console.warn(`[WARN] Glare with ${data.sender} — rolling back.`);
+                    await offerPc.setLocalDescription({ type: 'rollback' });
+                }
+
+                try {
+                    await offerPc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+                    const answer = await offerPc.createAnswer();
+                    await offerPc.setLocalDescription(answer);
+                    sendToServer({ type: 'answer', target: data.sender, sdp: answer });
+                } catch (err) {
+                    console.error(`[ERROR] Processing offer from ${data.sender}:`, err.message);
+                }
+                break;
+            }
+
+            // ── Nhận Answer ───────────────────────────────────────────────
+            case 'answer': {
+                if (peers[data.sender]) {
+                    try {
+                        await peers[data.sender].setRemoteDescription(
+                            new RTCSessionDescription(data.sdp)
+                        );
+                    } catch (err) {
+                        console.error(`[ERROR] setRemoteDescription(answer) from ${data.sender}:`, err.message);
+                    }
+                }
+                break;
+            }
+
+            // ── Nhận ICE Candidate ────────────────────────────────────────
+            case 'candidate': {
+                if (peers[data.sender]) {
+                    try {
+                        await peers[data.sender].addIceCandidate(
+                            new RTCIceCandidate(data.candidate)
+                        );
+                    } catch (err) {
+                        console.warn(`[WARN] addIceCandidate from ${data.sender}:`, err.message);
+                    }
+                }
+                break;
+            }
+
+            // ── Thành viên rời/mất kết nối ───────────────────────────────
+            case 'memberLeft': {
+                handlePeerDisconnected(data.sender);
+                break;
+            }
+
+            // ── endCall: ai đó kết thúc toàn bộ cuộc gọi ─────────────────
+            case 'callEnded': {
+                console.log(`[INFO] callEnded from: ${data.sender}`);
+                updateUIStatus(`"${data.sender}" đã kết thúc cuộc gọi.`, 'warn');
+                cleanUpCallOnly();
+                groupCallActive = false;
+                const startBtn = document.getElementById('btn-start-call');
+                if (startBtn) startBtn.disabled = false;
+                break;
+            }
+
+            // ── Mic status update ───────────────────────────────────────
+            case 'micStatus': {
+                if (data.sender && data.sender !== myClientId) {
+                    memberMicEnabled.set(data.sender, !!data.enabled);
+                    renderMemberList();
+                }
+                break;
+            }
+
+            // ── Start group call (broadcast) ─────────────────────────────
+            case 'startCall': {
+                if (Array.isArray(data.members)) {
+                    roomMembers.clear();
+                    for (const id of data.members) {
+                        if (id !== myClientId) roomMembers.add(id);
+                    }
+                    renderMemberList();
+                }
+
+                await startMeshForMembers();
+                break;
+            }
+
+            default:
+                console.warn(`[WARN] Unknown message type: "${data.type}"`);
         }
+    };
+
+    ws.onclose = (e) => {
+        console.log(`[WS] Closed (code: ${e.code})`);
+        updateUIStatus('Mất kết nối tới server.', 'error');
+    };
+
+    ws.onerror = (e) => {
+        console.error('[WS ERROR]', e);
+        updateUIStatus('Lỗi WebSocket.', 'error');
     };
 }
 
+// Helper: gửi message lên server
 function sendToServer(msg) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
     msg.sender = myClientId;
-    msg.roomId = roomId;
+    msg.roomId = getRoomId();
     ws.send(JSON.stringify(msg));
 }
 
-// 3. WebRTC Core Logic (Mesh & Fallback)
+// ═══════════════════════════════════════════════════════════════════════════════
+// 6. WebRTC PEER CONNECTION
+// ═══════════════════════════════════════════════════════════════════════════════
 function createPeerConnection(targetId) {
+    if (peers[targetId]) return peers[targetId];
+
     const pc = new RTCPeerConnection(rtcConfig);
     peers[targetId] = pc;
-    let fallbackTimer;
+    let fallbackTimer = null;
 
-    // Add local tracks to the connection
+    // Add local tracks
     localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
-    // Handle incoming remote media
+    // Remote track → thêm video vào grid
     pc.ontrack = (event) => {
-        console.log(`[INFO] Received remote track from ${targetId}`);
-        
-        // Check if the video element already exists to avoid duplicates
-        if (!document.getElementById(`video-${targetId}`)) {
-            const grid = document.getElementById('video-grid');
-            const newVideo = document.createElement('video');
-            
-            newVideo.id = `video-${targetId}`;
-            newVideo.autoplay = true;
-            newVideo.playsInline = true;
-            newVideo.srcObject = event.streams[0]; // Attach the remote stream
-            
-            grid.appendChild(newVideo);
-        }
+        console.log(`[TRACK] Remote track from ${targetId}`);
+        if (document.getElementById(`video-${targetId}`)) return;
+
+        const grid    = document.getElementById('video-grid');
+        const wrapper = document.createElement('div');
+        wrapper.id        = `wrapper-${targetId}`;
+        wrapper.className = 'video-wrapper';
+
+        const video      = document.createElement('video');
+        video.id         = `video-${targetId}`;
+        video.autoplay   = true;
+        video.playsInline = true;
+        video.srcObject  = event.streams[0];
+
+        const overlay  = document.createElement('div');
+        overlay.className = 'video-overlay';
+        const color = getAvatarColor(targetId);
+        overlay.innerHTML = `
+            <span class="video-label" style="color:#fff">${targetId}</span>
+            <span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block"></span>
+        `;
+
+        wrapper.appendChild(video);
+        wrapper.appendChild(overlay);
+        grid.appendChild(wrapper);
+
+        // Update member status to "calling"
+        renderMemberList();
     };
 
     // Send ICE candidates to the target peer
@@ -147,58 +491,232 @@ function createPeerConnection(targetId) {
         }
     };
 
+    
+    // Connection state
     pc.onconnectionstatechange = () => {
         console.log(`[CONN STATE] ${targetId}: ${pc.connectionState}`);
+        renderMemberList(); // Cập nhật trạng thái trong member list
+        if (pc.connectionState === 'failed') {
+            console.error(`[ERROR] Connection failed with ${targetId}`);
+            updateUIStatus(`❌ Kết nối thất bại với ${targetId}`, 'error');
+        }
     };
 
-    // Monitor Connection State & Trigger Fallback
+    // ICE state + fallback
     pc.oniceconnectionstatechange = () => {
         const state = pc.iceConnectionState;
-        console.log(`[ICE STATE] Connection with ${targetId}: ${state}`);
-        
-        updateUIStatus(`Trạng thái ICE: ${state.toUpperCase()}`);
+        console.log(`[ICE STATE] ${targetId}: ${state}`);
+        updateUIStatus(`ICE [${targetId}]: ${state.toUpperCase()}`);
 
         if (state === 'checking') {
             fallbackTimer = setTimeout(() => {
-                if (pc.iceConnectionState !== 'connected' && pc.iceConnectionState !== 'completed') {
-                    const warnMsg = `P2P failed, trying TURN...`;
-                    console.warn(`[WARN] ${warnMsg}`);
-                    updateUIStatus(warnMsg, true);
+                if (pc.iceConnectionState === 'checking') {
+                    const msg = `P2P checking quá lâu → Browser đang thử TURN relay...`;
+                    console.warn(`[WARN] ${msg}`);
+                    updateUIStatus(msg, 'warn');
                 }
             }, ICE_TIMEOUT_MS);
-            
+
         } else if (state === 'connected' || state === 'completed') {
             clearTimeout(fallbackTimer);
-            console.log(`[SUCCESS] Media established with ${targetId}`);
-            updateUIStatus(`Kết nối thành công (WebRTC)!`);
+            updateUIStatus(`✅ Đã kết nối với ${targetId}!`);
             analyzeConnectionStats(pc, targetId);
-            
-        } else if (state === 'failed' || state === 'disconnected') {
+            renderMemberList();
+
+        } else if (state === 'failed') {
             clearTimeout(fallbackTimer);
-            console.error(`[ERROR] Connection completely failed with ${targetId}`);
-            updateUIStatus(`Kết nối thất bại.`, true);
+            console.error(`[ERROR] ICE failed: ${targetId}. Kiểm tra TURN server!`);
+            updateUIStatus(`❌ ICE failed với ${targetId}. Kiểm tra TURN server!`, 'error');
+
+        } else if (state === 'disconnected') {
+            clearTimeout(fallbackTimer);
+            updateUIStatus(`⚠️ Mất kết nối tạm với ${targetId}...`, 'warn');
         }
     };
 
     return pc;
 }
 
-// 4. Analytics: Verify TURN Usage
+// ═══════════════════════════════════════════════════════════════════════════════
+// 7. PEER CLEANUP
+// ═══════════════════════════════════════════════════════════════════════════════
+function handlePeerDisconnected(peerId) {
+    console.log(`[INFO] Peer disconnected: ${peerId}`);
+
+    if (peers[peerId]) { peers[peerId].close(); delete peers[peerId]; }
+
+    const wrapper = document.getElementById(`wrapper-${peerId}`);
+    if (wrapper) wrapper.remove();
+
+    removeMember(peerId);
+    updateUIStatus(`"${peerId}" đã rời phòng.`, 'warn');
+}
+
+function cleanUpAllPeers() {
+    for (const id in peers) { peers[id].close(); }
+    peers = {};
+
+    // Xóa tất cả remote video wrappers
+    document.querySelectorAll('.video-wrapper:not(#local-wrapper)').forEach(el => el.remove());
+
+    // Reset member list (chỉ giữ bản thân)
+    roomMembers.clear();
+    renderMemberList();
+}
+
+function cleanUpCallOnly() {
+    for (const id in peers) { peers[id].close(); }
+    peers = {};
+
+    document.querySelectorAll('.video-wrapper:not(#local-wrapper)').forEach(el => el.remove());
+    renderMemberList();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 8. HANG UP
+// ═══════════════════════════════════════════════════════════════════════════════
+function hangUp() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { showLobby(); return; }
+
+    console.log(`[INFO] Hang up: ${new Date().toLocaleTimeString()}`);
+    sendToServer({ type: 'leaveRoom' });
+
+    cleanUpAllPeers();
+
+    stopLocalMedia();
+
+    ws.close(); ws = null;
+
+    groupCallActive = false;
+    const startBtn = document.getElementById('btn-start-call');
+    if (startBtn) startBtn.disabled = false;
+
+    // Quay về lobby
+    showLobby();
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 8.1 START GROUP CALL
+// ═══════════════════════════════════════════════════════════════════════════════
+async function startGroupCall() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        updateUIStatus('Chưa kết nối tới server.', 'error');
+        return;
+    }
+    if (!localStream) {
+        try {
+            localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            const localVideo = document.getElementById('localVideo');
+            if (localVideo) localVideo.srcObject = localStream;
+        } catch (err) {
+            console.error('[ERROR] getUserMedia failed:', err);
+            updateUIStatus('Không thể mở lại camera/mic.', 'error');
+            return;
+        }
+    }
+
+    const startBtn = document.getElementById('btn-start-call');
+    if (startBtn) startBtn.disabled = true;
+
+    sendToServer({ type: 'startCall' });
+}
+
+function shouldInitiateOffer(targetId) {
+    return myClientId < targetId;
+}
+
+async function startMeshForMembers() {
+    groupCallActive = true;
+    const startBtn = document.getElementById('btn-start-call');
+    if (startBtn) startBtn.disabled = true;
+
+    const targets = Array.from(roomMembers);
+    if (targets.length === 0) {
+        updateUIStatus('Chưa có thành viên khác trong phòng.', 'warn');
+        return;
+    }
+
+    updateUIStatus('Đang bắt đầu gọi nhóm...');
+    for (const targetId of targets) {
+        if (!peers[targetId]) createPeerConnection(targetId);
+        if (!shouldInitiateOffer(targetId)) continue;
+
+        const pc = peers[targetId];
+        try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            sendToServer({ type: 'offer', target: targetId, sdp: offer });
+        } catch (err) {
+            console.error(`[ERROR] createOffer to ${targetId}:`, err.message);
+        }
+    }
+}
+
+function endCallRoom() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { return; }
+
+    console.log(`[INFO] End call: ${new Date().toLocaleTimeString()}`);
+    sendToServer({ type: 'endCall' });
+    cleanUpCallOnly();
+
+    groupCallActive = false;
+    const startBtn = document.getElementById('btn-start-call');
+    if (startBtn) startBtn.disabled = false;
+}
+
+function stopLocalMedia() {
+    if (!localStream) return;
+    localStream.getTracks().forEach(t => t.stop());
+    localStream = null;
+    const lv = document.getElementById('localVideo');
+    if (lv) lv.srcObject = null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 9. MIC / CAM TOGGLE
+// ═══════════════════════════════════════════════════════════════════════════════
+function toggleMic() {
+    if (!localStream) return;
+    micEnabled = !micEnabled;
+    localStream.getAudioTracks().forEach(t => (t.enabled = micEnabled));
+    const btn = document.getElementById('btn-toggle-mic');
+    btn.innerText = micEnabled ? '🎙️ Tắt Mic' : '🔇 Bật Mic';
+    btn.style.borderColor = micEnabled ? '' : 'var(--accent-red)';
+    btn.style.color       = micEnabled ? '' : 'var(--accent-red)';
+    sendToServer({ type: 'micStatus', enabled: micEnabled });
+    renderMemberList();
+}
+
+function toggleCam() {
+    if (!localStream) return;
+    camEnabled = !camEnabled;
+    localStream.getVideoTracks().forEach(t => (t.enabled = camEnabled));
+    const btn = document.getElementById('btn-toggle-cam');
+    btn.innerText = camEnabled ? '📷 Tắt Camera' : '🚫 Bật Camera';
+    btn.style.borderColor = camEnabled ? '' : 'var(--accent-red)';
+    btn.style.color       = camEnabled ? '' : 'var(--accent-red)';
+
+    // Tối màu local video khi tắt cam
+    const localWrapper = document.getElementById('local-wrapper');
+    if (localWrapper) localWrapper.style.filter = camEnabled ? '' : 'brightness(0.15)';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 10. ANALYTICS
+// ═══════════════════════════════════════════════════════════════════════════════
 async function analyzeConnectionStats(pc, targetId) {
     try {
         const stats = await pc.getStats();
-        let activeCandidatePair = null;
-
-        stats.forEach(report => {
-            if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) {
-                activeCandidatePair = report;
-            }
+        let activePair = null;
+        stats.forEach(r => {
+            if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated)
+                activePair = r;
         });
-
-        if (activeCandidatePair) {
-            const localCandidate = stats.get(activeCandidatePair.localCandidateId);
-            if (localCandidate) {
-                const connType = localCandidate.candidateType; 
+        if (activePair) {
+            const lc = stats.get(activePair.localCandidateId);
+            if (lc) {
+                const connType = lc.candidateType; // host | srflx | relay
                 console.log(`\n=========================================`);
                 console.log(`          CONNECTION REPORT [${targetId}]       `);
                 console.log(`=========================================`);
@@ -207,54 +725,30 @@ async function analyzeConnectionStats(pc, targetId) {
                 console.log(`- ICE State       : ${pc.iceConnectionState}`);
                 console.log(`- Used Route      : [ ${connType.toUpperCase()} ]`);
                 console.log(`=========================================\n`);
-                
-                // (Bonus) Bạn có thể in thẳng Route đang dùng lên UI
-                updateUIStatus(`Đã kết nối qua: ${connType.toUpperCase()}`);
+                updateUIStatus(`✅ Kết nối qua: ${connType.toUpperCase()} với ${targetId}`);
             }
         }
     } catch (err) {
-        console.error("[ERROR] Failed to fetch connection stats:", err);
+        console.error('[ERROR] Failed to fetch connection stats:', err);
     }
 }
 
-// Add this helper function
-function updateUIStatus(message, isWarning = false) {
-    const statusText = document.getElementById('status-text');
-    if (statusText) {
-        statusText.innerText = message;
-        statusText.style.color = isWarning ? '#ffaa00' : '#00ff88';
+// ═══════════════════════════════════════════════════════════════════════════════
+// 11. UI STATUS HELPER
+// ═══════════════════════════════════════════════════════════════════════════════
+function updateUIStatus(message, level = 'ok') {
+    // 'ok' | 'warn' | 'error'
+    const el    = document.getElementById('status-text');
+    const board = document.getElementById('status-board');
+    if (!el) return;
+
+    el.innerText = message;
+
+    if (level === 'error') {
+        el.style.color = 'var(--accent-red)';
+    } else if (level === 'warn') {
+        el.style.color = 'var(--accent-orange)';
+    } else {
+        el.style.color = 'var(--accent-green)';
     }
 }
-
-// In your init() function, add this to show the random ID generated:
-document.getElementById('my-id-display').innerText = myClientId;
-
-function hangUp() {
-    console.log(`[INFO] Call ended at: ${new Date().toLocaleTimeString()}`);
-    console.log("[INFO] Hanging up...");
-    
-    // 1. Tell the server we are leaving
-    sendToServer({ type: 'userLeft', sender: myClientId });
-    
-    // 2. Close all active WebRTC peer connections
-    for (let peerId in peers) {
-        peers[peerId].close();
-    }
-    
-    // 3. Turn off local camera and mic
-    if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
-    }
-    
-    // 4. Disconnect WebSocket
-    if (ws) {
-        ws.close();
-    }
-    
-    updateUIStatus("Disconnected from room.", true);
-    document.getElementById('video-grid').innerHTML = ''; // Clear the screen
-}
-
-// Start the app when the page loads
-window.onload = init;
-

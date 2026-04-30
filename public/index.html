@@ -1,106 +1,711 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="vi">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WebRTC Mesh Group Call</title>
+    <meta name="description" content="Ứng dụng họp nhóm WebRTC Mesh — hỗ trợ gọi nhóm nhiều người trong cùng phòng qua P2P/TURN.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
     <style>
+        /* ════════════════════════════════════════════════════════════════
+           RESET & DESIGN TOKENS
+        ════════════════════════════════════════════════════════════════ */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg-base:      #0b0e17;
+            --bg-card:      #141827;
+            --bg-panel:     #1a1f30;
+            --border:       #252a3a;
+            --border-hover: #2e3750;
+            --accent-blue:  #3b82f6;
+            --accent-green: #22c55e;
+            --accent-red:   #ef4444;
+            --accent-orange:#f59e0b;
+            --text-primary: #f1f5f9;
+            --text-muted:   #64748b;
+            --text-dim:     #94a3b8;
+            --font:         'Inter', 'Segoe UI', sans-serif;
+            --radius-sm:    6px;
+            --radius-md:    10px;
+            --radius-lg:    16px;
+            --shadow:       0 4px 24px rgba(0,0,0,0.4);
+        }
+
         body {
-            font-family: Arial, sans-serif;
-            background-color: #1e1e1e;
-            color: #ffffff;
-            margin: 0;
-            padding: 20px;
+            font-family: var(--font);
+            background: var(--bg-base);
+            color: var(--text-primary);
+            min-height: 100vh;
             display: flex;
             flex-direction: column;
             align-items: center;
         }
 
-        .header {
-            text-align: center;
-            margin-bottom: 20px;
-        }
-
-        /* Network Status Monitor */
-        #status-board {
-            background-color: #2d2d2d;
-            border-left: 4px solid #00ff88;
-            padding: 15px;
-            margin-bottom: 20px;
+        /* ════════════════════════════════════════════════════════════════
+           TOP NAVBAR
+        ════════════════════════════════════════════════════════════════ */
+        .navbar {
             width: 100%;
-            max-width: 800px;
-            border-radius: 4px;
-            font-family: monospace;
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border);
+            padding: 0 24px;
+            height: 56px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 100;
         }
 
-        #status-text {
-            color: #00ff88;
-            font-weight: bold;
+        .nav-brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 1rem;
+            font-weight: 700;
+            color: var(--accent-blue);
+            letter-spacing: -0.3px;
         }
 
-        /* Responsive Video Grid */
+        .nav-brand .dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: var(--accent-green);
+            box-shadow: 0 0 8px var(--accent-green);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.6; transform: scale(0.85); }
+        }
+
+        .nav-meta {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            font-size: 0.78rem;
+            color: var(--text-muted);
+        }
+
+        .nav-meta .chip {
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 3px 10px;
+            font-size: 0.75rem;
+            color: var(--text-dim);
+        }
+
+        .nav-meta .chip span { color: var(--accent-blue); font-weight: 600; }
+
+        /* ════════════════════════════════════════════════════════════════
+           PHASE 1: LOBBY SCREEN
+        ════════════════════════════════════════════════════════════════ */
+        #lobby-screen {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            flex: 1;
+            width: 100%;
+            padding: 40px 20px;
+            min-height: calc(100vh - 56px);
+        }
+
+        .lobby-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 40px 36px;
+            width: 100%;
+            max-width: 440px;
+            box-shadow: var(--shadow);
+        }
+
+        .lobby-icon {
+            font-size: 3rem;
+            text-align: center;
+            margin-bottom: 12px;
+        }
+
+        .lobby-card h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            text-align: center;
+            margin-bottom: 6px;
+            background: linear-gradient(135deg, #f1f5f9, #94a3b8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .lobby-card .subtitle {
+            text-align: center;
+            font-size: 0.83rem;
+            color: var(--text-muted);
+            margin-bottom: 28px;
+        }
+
+        /* My ID display in lobby */
+        .my-id-box {
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 10px 14px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.82rem;
+        }
+
+        .my-id-box .label { color: var(--text-muted); }
+        .my-id-box .value {
+            font-family: 'Courier New', monospace;
+            color: var(--accent-blue);
+            font-weight: 600;
+            font-size: 0.88rem;
+        }
+
+        /* Form group */
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-dim);
+            margin-bottom: 7px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 11px 14px;
+            background: var(--bg-panel);
+            border: 1.5px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            font-family: var(--font);
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .form-group input:focus {
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 0 3px rgba(59,130,246,0.15);
+        }
+
+        .form-group input::placeholder { color: var(--text-muted); }
+
+        /* Button group */
+        .btn-group {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .btn {
+            padding: 11px 18px;
+            border: none;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            font-size: 0.92rem;
+            font-weight: 600;
+            font-family: var(--font);
+            transition: opacity 0.15s, transform 0.1s, box-shadow 0.15s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 7px;
+        }
+
+        .btn:active { transform: scale(0.97); }
+
+        .btn-primary {
+            background: var(--accent-blue);
+            color: #fff;
+            box-shadow: 0 2px 12px rgba(59,130,246,0.35);
+        }
+
+        .btn-primary:hover { opacity: 0.9; box-shadow: 0 4px 18px rgba(59,130,246,0.45); }
+
+        .btn-secondary {
+            background: var(--bg-panel);
+            color: var(--text-primary);
+            border: 1.5px solid var(--border);
+        }
+
+        .btn-secondary:hover { border-color: var(--border-hover); background: #212840; }
+
+        .btn-danger {
+            background: var(--accent-red);
+            color: #fff;
+            box-shadow: 0 2px 12px rgba(239,68,68,0.3);
+        }
+
+        .btn-danger:hover { opacity: 0.9; }
+
+        .btn-success {
+            background: var(--accent-green);
+            color: #000;
+            box-shadow: 0 2px 12px rgba(34,197,94,0.3);
+        }
+
+        .btn-success:hover { opacity: 0.9; }
+
+        .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+        /* Lobby divider */
+        .divider {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin: 16px 0;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+        .divider::before, .divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: var(--border);
+        }
+
+        /* ════════════════════════════════════════════════════════════════
+           PHASE 2: ROOM SCREEN
+        ════════════════════════════════════════════════════════════════ */
+        #room-screen {
+            display: none;
+            width: 100%;
+            flex: 1;
+            flex-direction: column;
+            max-width: 1280px;
+            padding: 20px 16px 32px;
+            gap: 16px;
+        }
+
+        #room-screen.active {
+            display: flex;
+        }
+
+        /* ── Room Info Bar ──────────────────────────────────────────── */
+        .room-info-bar {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 12px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .room-info-bar .room-name {
+            font-size: 0.95rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .room-info-bar .room-name .badge {
+            font-size: 0.72rem;
+            background: rgba(59,130,246,0.15);
+            color: var(--accent-blue);
+            border: 1px solid rgba(59,130,246,0.3);
+            border-radius: 20px;
+            padding: 2px 9px;
+        }
+
+        /* ── Status Board ───────────────────────────────────────────── */
+        #status-board {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--accent-green);
+            border-radius: var(--radius-sm);
+            padding: 10px 16px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.79rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        #status-board .label { color: var(--text-muted); white-space: nowrap; }
+        #status-text { color: var(--accent-green); font-weight: 600; }
+        #status-board.warn { border-left-color: var(--accent-orange); }
+        #status-board.warn #status-text { color: var(--accent-orange); }
+        #status-board.error-state { border-left-color: var(--accent-red); }
+        #status-board.error-state #status-text { color: var(--accent-red); }
+
+        /* ── Main layout: sidebar + video grid ──────────────────────── */
+        .room-layout {
+            display: grid;
+            grid-template-columns: 220px 1fr;
+            gap: 16px;
+            align-items: start;
+        }
+
+        @media (max-width: 768px) {
+            .room-layout { grid-template-columns: 1fr; }
+        }
+
+        /* ── Member List Sidebar ────────────────────────────────────── */
+        .member-sidebar {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 16px;
+            position: sticky;
+            top: 72px;
+        }
+
+        .member-sidebar h3 {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            margin-bottom: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        #member-count-badge {
+            background: var(--accent-blue);
+            color: #fff;
+            border-radius: 20px;
+            padding: 1px 8px;
+            font-size: 0.72rem;
+            font-weight: 700;
+        }
+
+        #member-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .member-item {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            padding: 8px 10px;
+            border-radius: var(--radius-sm);
+            background: var(--bg-panel);
+            border: 1px solid transparent;
+            font-size: 0.83rem;
+            animation: fadeIn 0.25s ease;
+        }
+
+        .member-item.me {
+            border-color: rgba(59,130,246,0.3);
+            background: rgba(59,130,246,0.08);
+        }
+
+        .member-item.connected {
+            border-color: rgba(34,197,94,0.25);
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .member-avatar {
+            width: 28px; height: 28px;
+            border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 0.72rem;
+            font-weight: 700;
+            color: #fff;
+            flex-shrink: 0;
+            text-transform: uppercase;
+        }
+
+        .member-info { min-width: 0; }
+        .member-name {
+            font-weight: 500;
+            color: var(--text-primary);
+            font-family: 'Courier New', monospace;
+            font-size: 0.8rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .member-status {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+
+        .member-status.online { color: var(--accent-green); }
+        .member-status.calling { color: var(--accent-blue); }
+
+        .mic-muted {
+            font-size: 0.75rem;
+            color: var(--accent-red);
+            margin-left: 4px;
+        }
+
+        /* ── Video Grid ─────────────────────────────────────────────── */
         #video-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 15px;
-            width: 100%;
-            max-width: 1200px;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 12px;
         }
+
+        .video-wrapper {
+            position: relative;
+            border-radius: var(--radius-md);
+            overflow: hidden;
+            background: #000;
+            border: 2px solid var(--border);
+            transition: border-color 0.2s;
+            aspect-ratio: 16/9;
+        }
+
+        .video-wrapper:hover { border-color: rgba(59,130,246,0.4); }
+        .video-wrapper.speaking { border-color: var(--accent-green) !important; }
 
         video {
             width: 100%;
-            height: 220px;
+            height: 100%;
             object-fit: cover;
-            background-color: #000;
-            border-radius: 8px;
-            border: 2px solid #444;
+            display: block;
         }
 
-        /* Highlight local video */
         #localVideo {
-            border-color: #00aaff;
-            transform: scaleX(-1); /* Mirror effect */
+            transform: scaleX(-1); /* mirror */
         }
 
-        .controls {
-            margin-top: 30px;
+        .video-overlay {
+            position: absolute;
+            bottom: 0; left: 0; right: 0;
+            background: linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 100%);
+            padding: 20px 12px 10px;
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
         }
 
-        button {
-            padding: 12px 24px;
-            font-size: 16px;
-            background-color: #ff4757;
-            color: white;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            font-weight: bold;
+        .video-label {
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: #fff;
+            font-family: 'Courier New', monospace;
         }
 
-        button:hover {
-            background-color: #ff6b81;
+        .video-badge-you {
+            font-size: 0.68rem;
+            background: var(--accent-blue);
+            color: #fff;
+            border-radius: 4px;
+            padding: 1px 6px;
+        }
+
+        /* ── Controls Bar ───────────────────────────────────────────── */
+        .controls-bar {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 14px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        /* ════════════════════════════════════════════════════════════════
+           LOADING OVERLAY
+        ════════════════════════════════════════════════════════════════ */
+        #loading-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(11,14,23,0.85);
+            backdrop-filter: blur(4px);
+            z-index: 999;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        #loading-overlay.active { display: flex; }
+
+        .spinner {
+            width: 40px; height: 40px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .loading-text {
+            font-size: 0.88rem;
+            color: var(--text-dim);
         }
     </style>
 </head>
 <body>
 
-    <div class="header">
-        <h2>WebRTC Mesh Room</h2>
-        <p>Room ID: <span id="room-display">demo-room</span> | My ID: <span id="my-id-display">...</span></p>
+<!-- ════════ NAVBAR ════════════════════════════════════════════════════════ -->
+<nav class="navbar">
+    <div class="nav-brand">
+        <span>📹</span>
+        <span>WebRTC Mesh</span>
+        <div class="dot"></div>
+    </div>
+    <div class="nav-meta">
+        <div class="chip">My ID: <span id="my-id-display">—</span></div>
+        <div class="chip" id="room-chip" style="display:none">Room: <span id="room-display">—</span></div>
+    </div>
+</nav>
+
+<!-- ════════ LOADING OVERLAY ════════════════════════════════════════════════ -->
+<div id="loading-overlay">
+    <div class="spinner"></div>
+    <div class="loading-text" id="loading-text">Đang khởi tạo...</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════════
+     PHASE 1: LOBBY SCREEN
+════════════════════════════════════════════════════════════════════════ -->
+<div id="lobby-screen">
+    <div class="lobby-card">
+        <div class="lobby-icon">🎥</div>
+        <h1>Phòng Họp Nhóm</h1>
+        <p class="subtitle">Nhập tên phòng để tạo mới hoặc gia nhập phòng đang có</p>
+
+        <!-- My ID -->
+        <div class="my-id-box">
+            <span class="label">ID của bạn</span>
+            <span class="value" id="lobby-my-id">—</span>
+        </div>
+
+        <!-- Room name input -->
+        <div class="form-group">
+            <label for="room-input">Tên Phòng (Room ID)</label>
+            <input
+                id="room-input"
+                type="text"
+                value=""
+                placeholder="Nhập tên phòng cần tham gia..."
+                maxlength="40"
+                autocomplete="off"
+                spellcheck="false"
+                onkeydown="if(event.key==='Enter') joinRoom()"
+            >
+        </div>
+
+        <!-- Inline error message -->
+        <div id="lobby-error" style="
+            display: none;
+            background: rgba(239,68,68,0.1);
+            border: 1px solid rgba(239,68,68,0.4);
+            border-radius: 6px;
+            padding: 10px 14px;
+            font-size: 0.82rem;
+            color: #fca5a5;
+            margin-bottom: 4px;
+            line-height: 1.5;
+        "></div>
+
+        <!-- Buttons -->
+        <div class="btn-group">
+            <button class="btn btn-primary" id="btn-join" onclick="joinRoom()">
+                🚪 Vào Phòng
+            </button>
+            <button class="btn btn-secondary" id="btn-create" onclick="createRoom()">
+                ✨ Tạo Phòng Mới
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════════
+     PHASE 2: ROOM SCREEN
+════════════════════════════════════════════════════════════════════════ -->
+<div id="room-screen">
+
+    <!-- Room info bar -->
+    <div class="room-info-bar">
+        <div class="room-name">
+            🏠 <strong id="room-title">demo-room</strong>
+            <span class="badge" id="room-status-badge">Đang kết nối...</span>
+        </div>
+        <div style="font-size:0.78rem; color: var(--text-muted);">
+            System State: <span id="status-text" style="color:var(--accent-green); font-weight:600;">Khởi tạo...</span>
+        </div>
     </div>
 
-    <div id="status-board">
-        <div>System State: <span id="status-text">Initializing...</span></div>
+    <!-- Main layout: member list + video grid -->
+    <div class="room-layout">
+
+        <!-- ── Left: Member List Sidebar ───────────────────────────── -->
+        <div class="member-sidebar">
+            <h3>
+                Thành Viên
+                <span id="member-count-badge">0</span>
+            </h3>
+            <ul id="member-list">
+                <!-- Populated by JavaScript -->
+            </ul>
+        </div>
+
+        <!-- ── Right: Video Grid ────────────────────────────────────── -->
+        <div id="video-grid">
+            <!-- Local video -->
+            <div class="video-wrapper" id="local-wrapper">
+                <video id="localVideo" autoplay muted playsinline></video>
+                <div class="video-overlay">
+                    <span class="video-label" id="local-video-label">Bạn</span>
+                    <span class="video-badge-you">YOU</span>
+                </div>
+            </div>
+            <!-- Remote videos added here dynamically -->
+        </div>
     </div>
 
-    <div id="video-grid">
-        <video id="localVideo" autoplay muted playsinline></video>
+    <!-- Controls bar -->
+    <div class="controls-bar">
+        <button class="btn btn-success" id="btn-start-call" onclick="startGroupCall()">
+            ▶️ Bắt Đầu Gọi Nhóm
+        </button>
+        <button class="btn btn-danger" id="btn-endcall" onclick="endCallRoom()">
+            ⛔ Kết Thúc Cuộc Gọi
+        </button>
+        <button class="btn btn-danger" id="btn-hangup" onclick="hangUp()">
+            📵 Rời Phòng
+        </button>
+        <button class="btn btn-secondary" id="btn-toggle-mic" onclick="toggleMic()">
+            🎙️ Tắt Mic
+        </button>
+        <button class="btn btn-secondary" id="btn-toggle-cam" onclick="toggleCam()">
+            📷 Tắt Camera
+        </button>
     </div>
 
-    <div class="controls">
-        <button onclick="hangUp()">Hang Up / Leave Room</button>
-    </div>
+</div>
 
-    <script src="app.js" defer></script>
+<script src="app.js" defer></script>
 </body>
 </html>
