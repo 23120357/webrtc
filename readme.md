@@ -118,8 +118,34 @@ Cho phép trình duyệt truy cập Camera và Microphone.
 
 Bạn cũng có thể sử dụng Ngrok để forward port 3000 ra ngoài, sau đó dùng thiết bị khác (chung mạng LAN hoặc máy ảo) truy cập vào link Ngrok để test luồng video thực tế.
 
-### 🧹 Dọn dẹp hệ thống
+---
 
-Sau khi làm việc xong, để tắt server và dọn dẹp các container của Docker, bạn chỉ cần nhấn Ctrl + C để tắt Node.js, sau đó:
+## 5. Cách tạo cert (self-signed)
 
-```npm run turn:down```
+Tạo chứng chỉ để phục vụ HTTPS/WSS khi cần test trình duyệt yêu cầu bảo mật:
+
+```
+mkdir -p certs
+openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/key.pem -out certs/cert.pem -days 365 \
+    -subj "/CN=localhost"
+```
+
+Gợi ý:
+- Nếu chạy trên Windows, có thể dùng Git Bash hoặc cài OpenSSL (ví dụ qua Chocolatey).
+- Bạn có thể thay `CN=localhost` bằng IP LAN nếu cần.
+
+---
+
+## 6. Cách test gọi 2 người và gọi nhóm 3–4 người
+
+### 6.1 Gọi 2 người
+1. Mở 2 tab trình duyệt (hoặc 2 thiết bị) cùng truy cập `http://<IP>:3000`.
+2. Ở Tab A: tạo phòng mới.
+3. Ở Tab B: nhập đúng Room ID và vào phòng.
+4. Nhấn **Bắt Đầu Gọi Nhóm** ở một tab để tạo kết nối P2P.
+
+### 6.2 Gọi nhóm 3–4 người
+1. Mở 3–4 tab trình duyệt (hoặc 3–4 thiết bị) cùng truy cập `http://<IP>:3000`.
+2. Tab A tạo phòng mới.
+3. Các tab còn lại nhập đúng Room ID để vào phòng.
+4. Nhấn **Bắt Đầu Gọi Nhóm** để tạo mesh kết nối giữa mọi người.

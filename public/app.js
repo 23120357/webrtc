@@ -21,6 +21,48 @@ const memberMicEnabled = new Map();
 
 // ── Identity (random, generated once per page load) ───────────────────────────
 const myClientId = Math.random().toString(36).substring(2, 9);
+let myDisplayName = myClientId;
+
+/** @type {Map<string, string>} */
+const memberDisplayNames = new Map();
+
+function escapeHtml(value) {
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function getDisplayName(id) {
+    if (id === myClientId) return myDisplayName || id;
+    return memberDisplayNames.get(id) || id;
+}
+
+function formatMemberLabel(id) {
+    const name = getDisplayName(id);
+    return name === id ? id : `${name} (${id})`;
+}
+
+function updateMyIdentityUI() {
+    const navId = document.getElementById('my-id-display');
+    const lobbyId = document.getElementById('lobby-my-id');
+    const localLabel = document.getElementById('local-video-label');
+
+    if (navId) navId.innerText = myClientId;
+    if (lobbyId) lobbyId.innerText = myClientId;
+    if (localLabel) localLabel.innerText = `Bạn (${getDisplayName(myClientId)})`;
+}
+
+function applyDisplayNameFromInput() {
+    const input = document.getElementById('name-input');
+    if (!input) return;
+
+    const raw = input.value.trim();
+    myDisplayName = raw || myClientId;
+    updateMyIdentityUI();
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const ICE_TIMEOUT_MS = 12000;
@@ -40,10 +82,16 @@ function getAvatarColor(id) {
 // 1. BOOTSTRAP — show lobby on page load (no auto-join)
 // ═══════════════════════════════════════════════════════════════════════════════
 window.onload = () => {
-    // Display my ID in both navbar and lobby card
-    document.getElementById('my-id-display').innerText  = myClientId;
-    document.getElementById('lobby-my-id').innerText    = myClientId;
-    document.getElementById('local-video-label').innerText = `Bạn (${myClientId})`;
+    updateMyIdentityUI();
+
+    const nameInput = document.getElementById('name-input');
+    if (nameInput) {
+        nameInput.value = myDisplayName;
+        nameInput.addEventListener('input', () => {
+            applyDisplayNameFromInput();
+            showLobbyError('');
+        });
+    }
 
     // Pre-fetch ICE config in background so it's ready when user clicks Join
     fetch('/api/turn-config')
@@ -116,17 +164,19 @@ function buildMemberItem(id, cssClass = '') {
     li.className = `member-item ${cssClass}`;
     li.id = `member-${id}`;
 
-    const initials = id.substring(0, 2).toUpperCase();
+    const displayName = getDisplayName(id);
+    const initials = (displayName || id).substring(0, 2).toUpperCase();
     const color    = getAvatarColor(id);
     const isMe     = id === myClientId;
 
     const micOn = id === myClientId ? micEnabled : memberMicEnabled.get(id) !== false;
     const micBadge = micOn ? '' : ' <span class="mic-muted">🚫🎙️</span>';
+    const safeLabel = escapeHtml(displayName || id);
 
     li.innerHTML = `
         <div class="member-avatar" style="background:${color}">${initials}</div>
         <div class="member-info">
-            <div class="member-name">${id}${isMe ? ' (bạn)' : ''}${micBadge}</div>
+            <div class="member-name">${safeLabel}${isMe ? ' (bạn)' : ''}${micBadge}</div>
             <div class="member-status ${cssClass === 'connected' ? 'calling' : 'online'}">
                 ${isMe ? '● Bạn' : cssClass === 'connected' ? '● Đang gọi' : '● Trong phòng'}
             </div>
@@ -169,6 +219,8 @@ function showLobbyError(msg) {
  * Bước 2: xin quyền camera → kết nối WS → vào phòng.
  */
 async function joinRoom() {
+    applyDisplayNameFromInput();
+
     const roomId = getRoomId();
     if (!roomId) {
         showLobbyError('Vui lòng nhập tên phòng trước khi vào!');
@@ -206,6 +258,8 @@ async function joinRoom() {
  * Bỏ qua bước kiểm tra tồn tại vì đây là phòng mới.
  */
 async function createRoom() {
+    applyDisplayNameFromInput();
+
     showLobbyError('');
     const newId = 'room-' + Math.random().toString(36).substring(2, 8);
     document.getElementById('room-input').value = newId;
@@ -218,6 +272,9 @@ async function createRoom() {
  */
 async function enterRoomDirect(roomId) {
     showLoading('Đang yêu cầu quyền Camera & Microphone...');
+
+    const nameInput = document.getElementById('name-input');
+    if (nameInput) nameInput.disabled = true;
 
     try {
         // Fetch ICE config nếu chưa có
@@ -264,7 +321,12 @@ function connectSignaling(roomId) {
     ws.onopen = () => {
         console.log(`[INFO] WS connected. Joining room: "${roomId}"`);
         updateUIStatus(`Đã kết nối. Đang vào phòng "${roomId}"...`);
-        ws.send(JSON.stringify({ type: 'joinRoom', roomId, sender: myClientId }));
+        ws.send(JSON.stringify({
+            type: 'joinRoom',
+            roomId,
+            sender: myClientId,
+            displayName: myDisplayName
+        }));
     };
 
     ws.onmessage = async (event) => {
@@ -276,18 +338,24 @@ function connectSignaling(roomId) {
 
             // ── Server gửi danh sách thành viên cho người mới join ─────────
             case 'roomInfo': {
-                console.log(`[INFO] roomInfo → members: [${data.members.join(', ')}]`);
+                const members = Array.isArray(data.members) ? data.members : [];
+                const ids = [];
 
-                for (const id of data.members) {
-                    if (id !== myClientId) {
-                        addMember(id);                       // Hiện trên member list
-                    }
+                for (const member of members) {
+                    const id = typeof member === 'string' ? member : member.id;
+                    const name = typeof member === 'string' ? null : member.name;
+                    if (!id || id === myClientId) continue;
+                    ids.push(id);
+                    if (name) memberDisplayNames.set(id, name);
+                    addMember(id);                       // Hiện trên member list
                 }
 
+                console.log(`[INFO] roomInfo → members: [${ids.join(', ')}]`);
+
                 updateUIStatus(
-                    data.members.length === 0
+                    ids.length === 0
                         ? 'Đang chờ thành viên khác tham gia...'
-                        : `Có ${data.members.length} thành viên trong phòng. Đang chờ kết nối...`
+                        : `Có ${ids.length} thành viên trong phòng. Đang chờ kết nối...`
                 );
                 break;
             }
@@ -295,6 +363,7 @@ function connectSignaling(roomId) {
             // ── Existing member thấy người mới → gửi offer ───────────────
             case 'userJoined': {
                 const newId = data.sender;
+                if (data.displayName) memberDisplayNames.set(newId, data.displayName);
                 console.log(`[INFO] userJoined: "${newId}" → tôi là existing member, gửi offer...`);
                 addMember(newId);
 
@@ -366,6 +435,7 @@ function connectSignaling(roomId) {
 
             // ── Thành viên rời/mất kết nối ───────────────────────────────
             case 'memberLeft': {
+                if (data.sender) memberDisplayNames.delete(data.sender);
                 handlePeerDisconnected(data.sender);
                 break;
             }
@@ -460,8 +530,9 @@ function createPeerConnection(targetId) {
         const overlay  = document.createElement('div');
         overlay.className = 'video-overlay';
         const color = getAvatarColor(targetId);
+        const safeLabel = escapeHtml(formatMemberLabel(targetId));
         overlay.innerHTML = `
-            <span class="video-label" style="color:#fff">${targetId}</span>
+            <span class="video-label" style="color:#fff">${safeLabel}</span>
             <span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block"></span>
         `;
 
@@ -485,7 +556,7 @@ function createPeerConnection(targetId) {
             // if (type.includes("typ srflx")) {
             //     console.log("[LOG] Đã chặn host và srflx. Đang ép dùng TURN...");
             //     return; 
-            // }
+            // }       
 
             sendToServer({ type: 'candidate', target: targetId, candidate: event.candidate });
         }
@@ -561,6 +632,7 @@ function cleanUpAllPeers() {
 
     // Reset member list (chỉ giữ bản thân)
     roomMembers.clear();
+    memberDisplayNames.clear();
     renderMemberList();
 }
 
@@ -593,6 +665,9 @@ function hangUp() {
 
     // Quay về lobby
     showLobby();
+
+    const nameInput = document.getElementById('name-input');
+    if (nameInput) nameInput.disabled = false;
 }
 
 

@@ -75,6 +75,9 @@ app.get('/api/room-check', (req, res) => {
 /** @type {Map<string, Map<string, WebSocket>>} */
 const rooms = new Map();
 
+/** @type {Map<string, Map<string, string>>} */
+const roomMemberNames = new Map();
+
 /** @type {Map<string, boolean>} */
 const roomCallActive = new Map();
 
@@ -85,6 +88,7 @@ const clientMeta = new Map();
 function getOrCreateRoom(roomId) {
     if (!rooms.has(roomId)) {
         rooms.set(roomId, new Map());
+        roomMemberNames.set(roomId, new Map());
         console.log(`[ROOM] Created new room: "${roomId}"`);
     }
     return rooms.get(roomId);
@@ -128,6 +132,8 @@ function removeClientFromRoom(ws) {
     if (!room) return;
 
     room.delete(clientId);
+    const nameMap = roomMemberNames.get(roomId);
+    if (nameMap) nameMap.delete(clientId);
     console.log(`[ROOM] Client "${clientId}" removed from room "${roomId}". Remaining: ${room.size}`);
 
     // Notify remaining peers so they can close the dead RTCPeerConnection & remove the video tile
@@ -139,6 +145,7 @@ function removeClientFromRoom(ws) {
     // Garbage-collect empty rooms to prevent memory leaks
     if (room.size === 0) {
         rooms.delete(roomId);
+        roomMemberNames.delete(roomId);
         console.log(`[ROOM] Room "${roomId}" is now empty and has been deleted.`);
     }
 }
@@ -167,7 +174,7 @@ wss.on('connection', (ws, req) => {
 
             // ── Join Room ────────────────────────────────────────────────
             case 'joinRoom': {
-                const { roomId, sender: clientId } = data;
+                const { roomId, sender: clientId, displayName } = data;
 
                 if (!roomId || !clientId) {
                     console.warn('[WARN] joinRoom missing roomId or sender – ignoring.');
@@ -181,11 +188,16 @@ wss.on('connection', (ws, req) => {
                 room.set(clientId, ws);
                 clientMeta.set(ws, { roomId, clientId });
 
+                const nameMap = roomMemberNames.get(roomId);
+                if (nameMap) nameMap.set(clientId, (displayName || clientId).toString());
+
                 console.log(`[JOIN] Client "${clientId}" joined room "${roomId}". Members: ${room.size}`);
 
                 // ① Send the new joiner the list of everyone already in the room
                 //    so the client can render the member list immediately
-                const existingMembers = [...room.keys()].filter(id => id !== clientId);
+                const existingMembers = [...room.keys()]
+                    .filter(id => id !== clientId)
+                    .map(id => ({ id, name: nameMap ? nameMap.get(id) : id }));
                 ws.send(JSON.stringify({
                     type: 'roomInfo',
                     roomId,
@@ -205,7 +217,8 @@ wss.on('connection', (ws, req) => {
                 // ② Notify existing members so they initiate RTCPeerConnection towards the newcomer
                 broadcastToRoom(roomId, clientId, {
                     type: 'userJoined',
-                    sender: clientId
+                    sender: clientId,
+                    displayName: nameMap ? nameMap.get(clientId) : clientId
                 });
                 break;
             }
