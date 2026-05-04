@@ -3,16 +3,13 @@ services:
     image: coturn/coturn:latest
     container_name: turn_server
     restart: unless-stopped
+    network_mode: "host"
     env_file: .env
-    ports:
-      - "3478:3478"
-      - "3478:3478/udp"
-      - "50000-51000:50000-51000/udp"
     volumes:
       - ./turnserver.conf:/etc/coturn/turnserver.conf
     command: 
       - turnserver
       - -c /etc/coturn/turnserver.conf
-      - --user=$TURN_USER:$TURN_PASS
-      - --realm=$TURN_REALM
-      - --external-ip=$SERVER_IP
+      - --user=${TURN_USER}:${TURN_PASS}
+      - --realm=${TURN_REALM}
+      - --external-ip=${SERVER_IP}

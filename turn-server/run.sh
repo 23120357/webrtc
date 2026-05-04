@@ -6,11 +6,12 @@ echo "=== INITIALIZING TURN SERVER ==="
 cd "$(dirname "$0")" || exit
 
 # Running Docker Compose
-echo "[1] Running Docker..."
+echo "[1] Running Docker (Host Network Mode)..."
 docker compose down
 docker compose up -d
 
 echo "------------------------------------------------"
 echo "SUCCESSFULLY INITIALIZED TURN SERVER"
 echo "TURN/STUN : Port 3478 (TCP & UDP)"
+echo "Relay Ports: 60000 - 60100 (UDP)"
 echo "------------------------------------------------"
