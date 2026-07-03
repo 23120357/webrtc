@@ -17,6 +17,33 @@ app.use(express.static(path.join(__dirname, '../public')));
 // 2. Dynamic API: Provide WebRTC ICE/TURN configuration to the client
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/api/turn-config', (req, res) => {
+    const useCloud = process.env.USE_CLOUD_TURN === 'true';
+
+    if (useCloud) {
+        const urls = process.env.CLOUD_TURN_URLS
+            ? process.env.CLOUD_TURN_URLS.split(',').map(u => u.trim())
+            : [];
+        const username = process.env.CLOUD_TURN_USER || "";
+        const credential = process.env.CLOUD_TURN_PASS || "";
+
+        console.log(`[INFO] Using Cloud TURN Server (URLs: ${urls.join(', ')})`);
+        return res.json({
+            iceServers: [
+                {
+                    urls: [
+                        "stun:stun.l.google.com:19302",
+                        "stun:stun1.l.google.com:19302"
+                    ]
+                },
+                ...(urls.length > 0 ? [{
+                    urls,
+                    username,
+                    credential
+                }] : [])
+            ]
+        });
+    }
+
     const ip = process.env.TURN_IP;
 
     if (!ip) {
@@ -146,6 +173,7 @@ function removeClientFromRoom(ws) {
     if (room.size === 0) {
         rooms.delete(roomId);
         roomMemberNames.delete(roomId);
+        roomCallActive.delete(roomId);
         console.log(`[ROOM] Room "${roomId}" is now empty and has been deleted.`);
     }
 }
@@ -185,6 +213,16 @@ wss.on('connection', (ws, req) => {
                 if (meta) removeClientFromRoom(ws);
 
                 const room = getOrCreateRoom(roomId);
+
+                // If another socket is already connected under the same clientId in this room,
+                // close the duplicate connection first to prevent conflicts.
+                const oldWs = room.get(clientId);
+                if (oldWs && oldWs !== ws) {
+                    console.log(`[JOIN] Duplicate client "${clientId}" in room "${roomId}". Closing old connection.`);
+                    removeClientFromRoom(oldWs);
+                    oldWs.close();
+                }
+
                 room.set(clientId, ws);
                 clientMeta.set(ws, { roomId, clientId });
 

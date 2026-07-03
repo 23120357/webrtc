@@ -352,4 +352,44 @@ Hoặc dùng trang web: [Trickle ICE](https://webrtc.github.io/samples/src/conte
 
 ---
 
+## 10. Nhật ký sửa đổi & Kiến thức mạng bổ sung
+
+### 10.1 Các sửa đổi quan trọng đã thực hiện trong code
+Để dự án chạy mượt mà và sửa một số lỗi tiềm ẩn, chúng ta đã thực hiện các thay đổi sau:
+1. **Docker Compose & TURN Server (Hỗ trợ Windows)**: 
+   - Thay vì dùng `network_mode: "host"` (chỉ chạy trên Linux), ta chuyển sang dùng cổng ánh xạ `ports: 3478:3478` và dải cổng dynamic relay `49152-49251:49152-49251/udp`.
+   - Cập nhật lại dải cổng relay trong `turnserver.conf` và script khởi chạy cho đồng bộ.
+2. **Khắc phục Memory Leak (Rò rỉ bộ nhớ server)**:
+   - Trong `server/server.js`, bổ sung `roomCallActive.delete(roomId)` khi phòng trống và bị xóa để tránh rò rỉ bộ nhớ Ram của node.
+3. **Lỗi trùng lặp Client ID khi tải lại trang nhanh**:
+   - Khi tab cũ chưa đóng kịp mà tab mới đã join trùng `clientId`, server sẽ tự động đóng và dọn dẹp socket cũ (`oldWs.close()`) trước khi gán socket mới.
+4. **Sửa lỗi không giải phóng Camera/Mic**:
+   - Hàm `hangUp()` ở client được viết lại để luôn đóng media (`stopLocalMedia()`) và đóng peer (`cleanUpAllPeers()`) ngay cả khi WebSocket bị ngắt đột ngột.
+5. **Sửa lỗi đen màn hình (Thiếu Video Track)**:
+   - Sự kiện `ontrack` kích hoạt riêng lẻ cho audio và video. Đoạn code cũ có `if (document.getElementById('video-' + targetId)) return;` khiến track video đến sau bị bỏ qua. Đã sửa để gộp tất cả track mới vào `srcObject` hiện tại của thẻ video.
+6. **Tối ưu hóa và hỗ trợ Cloud TURN (Metered.ca)**:
+   - Tích hợp thêm tùy chọn `USE_CLOUD_TURN=true` trong `server/.env` và nạp cấu hình thông qua các biến `CLOUD_TURN_URLS`, `CLOUD_TURN_USER`, `CLOUD_TURN_PASS`.
+
+---
+
+### 10.2 Giải thích các trường hợp mạng thực tế (Q&A)
+
+#### Q1: Tại sao không thể gọi video khi kết nối 2 thiết bị khác mạng (ví dụ: Wi-Fi nhà và 4G)?
+- **Giải thích**: Địa chỉ IP cấu hình TURN nội bộ kiểu `192.168.1.x` là **Private IP** (chỉ có giá trị trong mạng Wi-Fi LAN nhà bạn). Thiết bị mạng ngoài (như 4G) hoàn toàn không có cách nào gửi gói tin đến IP này. 
+- **Cách khắc phục**:
+  - **Cách A**: Mở cổng (Port Forwarding) trên Router và thay cấu hình thành IP công cộng (Public IP) của mạng nhà bạn.
+  - **Cách B**: Đăng ký một tài khoản Cloud TURN miễn phí từ nhà cung cấp (như Metered.ca, Xirsys...), dán cấu hình đó vào `server/.env` để chuyển gói tin qua internet.
+
+
+#### Q2: Tại sao khi tắt candidate `host` để ép dùng STUN/TURN, máy tính báo kết nối qua `RELAY` (TURN) còn điện thoại (cùng Wi-Fi) lại báo `SRFLX` (STUN)?
+- **Giải thích**: Đây gọi là **Asymmetric Routing (Định tuyến bất đối xứng)** do cơ chế chặn của **Tường lửa Windows (Windows Defender Firewall)**:
+  - Khi chặn `host`, gói tin đi vòng từ Điện thoại $\rightarrow$ Router Wi-Fi $\rightarrow$ Máy tính (gọi là **NAT Loopback/Hairpinning**).
+  - Gói tin đi vào máy tính có source IP từ bên ngoài nên bị Windows Firewall (mạng Public) chặn đứng. Không kết nối trực tiếp được qua STUN, máy tính bắt buộc phải đi vòng qua TURN Server để gửi/nhận dữ liệu (`RELAY`).
+  - Ngược lại, hệ điều hành điện thoại (Android/iOS) không có tường lửa chặn kết nối cục bộ dạng này nên vẫn nhận được trực tiếp gói tin từ máy tính gửi qua IP công cộng (`SRFLX`).
+
+#### Q3: Khi nào một kết nối WebRTC bắt buộc phải dùng tới TURN Server (`relay`)?
+- **Giải thích**: Khi cả 2 thiết bị đều nằm sau các router có chế độ **Symmetric NAT** (Ví dụ: Cả 2 đều dùng 4G của 2 nhà mạng khác nhau, hoặc mạng công ty bảo mật cao). NAT đối xứng sẽ đổi cổng liên tục khi kết nối tới địa chỉ khác nhau, khiến STUN (`srflx`) không thể xuyên thủng NAT $\rightarrow$ 100% cuộc gọi lúc này phải nhờ đến TURN Server làm trung chuyển (Relay).
+
+---
+
 *Made with ❤️ by Nhóm Anti Lập Trình Mạng*

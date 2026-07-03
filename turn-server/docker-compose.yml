@@ -3,7 +3,10 @@ services:
     image: coturn/coturn:latest
     container_name: turn_server
     restart: unless-stopped
-    network_mode: "host"
+    ports:
+      - "3478:3478"
+      - "3478:3478/udp"
+      - "49152-49251:49152-49251/udp"
     env_file: .env
     volumes:
       - ./turnserver.conf:/etc/coturn/turnserver.conf

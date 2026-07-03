@@ -3,13 +3,13 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let rtcConfig    = null;
-let localStream  = null;
+let rtcConfig = null;
+let localStream = null;
 /** @type {Object.<string, RTCPeerConnection>} */
-let peers        = {};
-let ws           = null;
-let micEnabled   = true;
-let camEnabled   = true;
+let peers = {};
+let ws = null;
+let micEnabled = true;
+let camEnabled = true;
 let groupCallActive = false;
 
 // ── Member list: Set of clientIds currently in the room ───────────────────────
@@ -69,8 +69,8 @@ const ICE_TIMEOUT_MS = 12000;
 
 // ── Avatar colors (deterministic based on ID) ─────────────────────────────────
 const AVATAR_COLORS = [
-    '#3b82f6','#8b5cf6','#ec4899','#f59e0b',
-    '#22c55e','#06b6d4','#f97316','#6366f1'
+    '#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b',
+    '#22c55e', '#06b6d4', '#f97316', '#6366f1'
 ];
 function getAvatarColor(id) {
     let hash = 0;
@@ -98,7 +98,7 @@ window.onload = () => {
         .then(r => r.json())
         .then(cfg => {
             rtcConfig = cfg;
-            console.log('[INFO] ICE config pre-loaded.');
+            console.log('[INFO] ICE config pre-loaded:', cfg);
         })
         .catch(() => console.warn('[WARN] Could not pre-load ICE config.'));
 };
@@ -115,8 +115,8 @@ function showLobby() {
 function showRoom(roomId) {
     document.getElementById('lobby-screen').style.display = 'none';
     document.getElementById('room-screen').classList.add('active');
-    document.getElementById('room-display').innerText  = roomId;
-    document.getElementById('room-title').innerText    = roomId;
+    document.getElementById('room-display').innerText = roomId;
+    document.getElementById('room-title').innerText = roomId;
     document.getElementById('room-chip').style.display = 'block';
 }
 
@@ -133,7 +133,7 @@ function hideLoading() {
 // 3. MEMBER LIST — render / add / remove
 // ═══════════════════════════════════════════════════════════════════════════════
 function renderMemberList() {
-    const ul    = document.getElementById('member-list');
+    const ul = document.getElementById('member-list');
     const badge = document.getElementById('member-count-badge');
     const badge2 = document.getElementById('room-status-badge');
 
@@ -166,8 +166,8 @@ function buildMemberItem(id, cssClass = '') {
 
     const displayName = getDisplayName(id);
     const initials = (displayName || id).substring(0, 2).toUpperCase();
-    const color    = getAvatarColor(id);
-    const isMe     = id === myClientId;
+    const color = getAvatarColor(id);
+    const isMe = id === myClientId;
 
     const micOn = id === myClientId ? micEnabled : memberMicEnabled.get(id) !== false;
     const micBadge = micOn ? '' : ' <span class="mic-muted">🚫🎙️</span>';
@@ -281,6 +281,9 @@ async function enterRoomDirect(roomId) {
         if (!rtcConfig) {
             const r = await fetch('/api/turn-config');
             rtcConfig = await r.json();
+            console.log('[INFO] ICE config fetched on join:', rtcConfig);
+        } else {
+            console.log('[INFO] Using pre-loaded ICE config:', rtcConfig);
         }
 
         // Xin quyền camera + mic
@@ -513,35 +516,50 @@ function createPeerConnection(targetId) {
 
     // Remote track → thêm video vào grid
     pc.ontrack = (event) => {
-        console.log(`[TRACK] Remote track from ${targetId}`);
-        if (document.getElementById(`video-${targetId}`)) return;
+        console.log(`[TRACK] Remote track from ${targetId} (Kind: ${event.track.kind})`);
+        let video = document.getElementById(`video-${targetId}`);
 
-        const grid    = document.getElementById('video-grid');
-        const wrapper = document.createElement('div');
-        wrapper.id        = `wrapper-${targetId}`;
-        wrapper.className = 'video-wrapper';
+        if (!video) {
+            const grid = document.getElementById('video-grid');
+            const wrapper = document.createElement('div');
+            wrapper.id = `wrapper-${targetId}`;
+            wrapper.className = 'video-wrapper';
 
-        const video      = document.createElement('video');
-        video.id         = `video-${targetId}`;
-        video.autoplay   = true;
-        video.playsInline = true;
-        video.srcObject  = event.streams[0];
+            video = document.createElement('video');
+            video.id = `video-${targetId}`;
+            video.autoplay = true;
+            video.playsInline = true;
 
-        const overlay  = document.createElement('div');
-        overlay.className = 'video-overlay';
-        const color = getAvatarColor(targetId);
-        const safeLabel = escapeHtml(formatMemberLabel(targetId));
-        overlay.innerHTML = `
-            <span class="video-label" style="color:#fff">${safeLabel}</span>
-            <span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block"></span>
-        `;
+            if (event.streams && event.streams[0]) {
+                video.srcObject = event.streams[0];
+            } else {
+                video.srcObject = new MediaStream([event.track]);
+            }
 
-        wrapper.appendChild(video);
-        wrapper.appendChild(overlay);
-        grid.appendChild(wrapper);
+            const overlay = document.createElement('div');
+            overlay.className = 'video-overlay';
+            const color = getAvatarColor(targetId);
+            const safeLabel = escapeHtml(formatMemberLabel(targetId));
+            overlay.innerHTML = `
+                <span class="video-label" style="color:#fff">${safeLabel}</span>
+                <span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block"></span>
+            `;
 
-        // Update member status to "calling"
-        renderMemberList();
+            wrapper.appendChild(video);
+            wrapper.appendChild(overlay);
+            grid.appendChild(wrapper);
+
+            // Update member status to "calling"
+            renderMemberList();
+        } else {
+            // Nếu phần tử video đã tồn tại, đảm bảo track mới được thêm vào srcObject hiện có
+            const stream = video.srcObject;
+            if (stream instanceof MediaStream) {
+                if (!stream.getTracks().includes(event.track)) {
+                    stream.addTrack(event.track);
+                }
+            }
+        }
     };
 
     // Send ICE candidates to the target peer
@@ -551,18 +569,18 @@ function createPeerConnection(targetId) {
             // comment out to use other kind of ICE server
             // if (type.includes("typ host")) {
             //     console.log("[LOG] Đã chặn host. Đang ép dùng SRFLX...");
-            //     return; 
+            //     return;
             // }
             // if (type.includes("typ srflx")) {
             //     console.log("[LOG] Đã chặn host và srflx. Đang ép dùng TURN...");
-            //     return; 
-            // }       
+            //     return;
+            // }
 
             sendToServer({ type: 'candidate', target: targetId, candidate: event.candidate });
         }
     };
 
-    
+
     // Connection state
     pc.onconnectionstatechange = () => {
         console.log(`[CONN STATE] ${targetId}: ${pc.connectionState}`);
@@ -648,16 +666,17 @@ function cleanUpCallOnly() {
 // 8. HANG UP
 // ═══════════════════════════════════════════════════════════════════════════════
 function hangUp() {
-    if (!ws || ws.readyState !== WebSocket.OPEN) { showLobby(); return; }
-
     console.log(`[INFO] Hang up: ${new Date().toLocaleTimeString()}`);
-    sendToServer({ type: 'leaveRoom' });
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        sendToServer({ type: 'leaveRoom' });
+        ws.close();
+    }
+    ws = null;
 
     cleanUpAllPeers();
 
     stopLocalMedia();
-
-    ws.close(); ws = null;
 
     groupCallActive = false;
     const startBtn = document.getElementById('btn-start-call');
@@ -758,7 +777,7 @@ function toggleMic() {
     const btn = document.getElementById('btn-toggle-mic');
     btn.innerText = micEnabled ? '🎙️ Tắt Mic' : '🔇 Bật Mic';
     btn.style.borderColor = micEnabled ? '' : 'var(--accent-red)';
-    btn.style.color       = micEnabled ? '' : 'var(--accent-red)';
+    btn.style.color = micEnabled ? '' : 'var(--accent-red)';
     sendToServer({ type: 'micStatus', enabled: micEnabled });
     renderMemberList();
 }
@@ -770,7 +789,7 @@ function toggleCam() {
     const btn = document.getElementById('btn-toggle-cam');
     btn.innerText = camEnabled ? '📷 Tắt Camera' : '🚫 Bật Camera';
     btn.style.borderColor = camEnabled ? '' : 'var(--accent-red)';
-    btn.style.color       = camEnabled ? '' : 'var(--accent-red)';
+    btn.style.color = camEnabled ? '' : 'var(--accent-red)';
 
     // Tối màu local video khi tắt cam
     const localWrapper = document.getElementById('local-wrapper');
@@ -813,7 +832,7 @@ async function analyzeConnectionStats(pc, targetId) {
 // ═══════════════════════════════════════════════════════════════════════════════
 function updateUIStatus(message, level = 'ok') {
     // 'ok' | 'warn' | 'error'
-    const el    = document.getElementById('status-text');
+    const el = document.getElementById('status-text');
     const board = document.getElementById('status-board');
     if (!el) return;
 
